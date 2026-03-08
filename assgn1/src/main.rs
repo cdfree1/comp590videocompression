@@ -124,12 +124,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for c in 0..width {
                     let pixel_index = (r * width + c) as usize;
 
-                    // Encode difference with same pixel in prior frame.
-                    // Normalize and modulate difference to 8-bit range.
-                    let pixel_difference = (((current_frame[pixel_index] as i32)
-                        - (prior_frame[pixel_index] as i32))
-                        + 256)
-                        % 256;
+                    // Minimal spatial predictor:
+                    // - use left pixel in current frame when available
+                    // - otherwise fall back to same pixel in prior frame
+                    let predictor = if c > 0 {
+                        current_frame[pixel_index - 1]
+                    } else {
+                        prior_frame[pixel_index]
+                    };
+
+                    // Encode residual and wrap into 8-bit range.
+                    let pixel_difference =
+                        (((current_frame[pixel_index] as i32) - (predictor as i32)) + 256) % 256;
 
                     enc.encode(&pixel_difference, &pixel_difference_pdf, &mut bw);
 
@@ -183,23 +189,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Set up initial prior frame as uniform medium gray
         let mut prior_frame = vec![128 as u8; (width * height) as usize];
 
-        'outer_loop: 
-        for frame in iter.filter_frames() {
+        'outer_loop: for frame in iter.filter_frames() {
             if frame.frame_num < skip_count + count {
                 if verbose {
                     print!("Checking frame: {} ... ", frame.frame_num);
                 }
 
                 let current_frame: Vec<u8> = frame.data; // <- raw pixel y values
+                let mut decoded_frame = vec![0 as u8; (width * height) as usize];
 
                 // Process pixels in row major order.
                 for r in 0..height {
                     for c in 0..width {
                         let pixel_index = (r * width + c) as usize;
-                        let decoded_pixel_difference = dec.decode(&pixel_difference_pdf, &mut br).to_owned();
+                        let decoded_pixel_difference =
+                            dec.decode(&pixel_difference_pdf, &mut br).to_owned();
                         pixel_difference_pdf.incr_count(&decoded_pixel_difference);
 
-                        let pixel_value = (prior_frame[pixel_index] as i32 + decoded_pixel_difference) % 256;
+                        let predictor = if c > 0 {
+                            decoded_frame[pixel_index - 1]
+                        } else {
+                            prior_frame[pixel_index]
+                        };
+
+                        let pixel_value = ((predictor as i32) + decoded_pixel_difference) % 256;
+                        decoded_frame[pixel_index] = pixel_value as u8;
 
                         if pixel_value != current_frame[pixel_index] as i32 {
                             println!(
